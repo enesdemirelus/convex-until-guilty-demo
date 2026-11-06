@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./tokens.css";
 
 export const metadata: Metadata = {
-  title: "Convex Until Proven Guilty — Accelerated Optimization",
+  title: "Convex Until Proven Guilty",
   description:
     "Interactive benchmark of gradient descent, Nesterov acceleration, and non-convex curvature monitoring.",
 };
