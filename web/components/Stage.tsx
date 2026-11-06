@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef } from "react";
 import {
+  Domain2D,
   MethodId,
   OUTLIER_DATA,
   PresetConfig,
@@ -42,6 +43,8 @@ export interface MethodOverlayRenderData {
 
 interface StageProps {
   preset: PresetConfig;
+  effectiveDomain: Domain2D;
+  sixPointsMedian?: Vec;
   startPoint: Vec;
   onSelectStartPoint: (pt: Vec) => void;
   rows: LedgerRowData[];
@@ -62,12 +65,16 @@ interface StageProps {
   onOutlierStartChange: (idx: number) => void;
   showNotABowl: boolean;
   onToggleNotABowl: () => void;
+  zoomToAction: boolean;
+  onToggleZoom: () => void;
   reducedMotion: boolean;
   liveAnnouncement: string;
 }
 
 export function Stage({
   preset,
+  effectiveDomain,
+  sixPointsMedian,
   startPoint,
   onSelectStartPoint,
   rows,
@@ -88,6 +95,8 @@ export function Stage({
   onOutlierStartChange,
   showNotABowl,
   onToggleNotABowl,
+  zoomToAction,
+  onToggleZoom,
   reducedMotion,
   liveAnnouncement,
 }: StageProps) {
@@ -114,12 +123,13 @@ export function Stage({
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      const vp = getPlotViewport(width, height, preset.domain);
+      const vp = getPlotViewport(width, height, effectiveDomain);
 
       if (preset.view === "curve") {
         draw1DQuarticCurve(ctx, preset, vp);
       } else {
-        const cacheKey = `${preset.id}:${bowlK}:${sixArrangement}:${showNotABowl}:${width}x${height}`;
+        const domainKey = `${effectiveDomain.xMin.toFixed(3)},${effectiveDomain.xMax.toFixed(3)},${effectiveDomain.yMin.toFixed(3)},${effectiveDomain.yMax.toFixed(3)}`;
+        const cacheKey = `${preset.id}:${bowlK}:${sixArrangement}:${showNotABowl}:${domainKey}:${width}x${height}`;
         if (!backdropRef.current || backdropRef.current.key !== cacheKey) {
           backdropRef.current = {
             key: cacheKey,
@@ -140,7 +150,13 @@ export function Stage({
       if (preset.id === "sixpoints") {
         const primaryQ =
           methodOverlays.find((m) => m.id === "alg1")?.currentPos ?? startPoint;
-        drawSixPointsOverlay(ctx, vp, sixArrangement, primaryQ);
+        drawSixPointsOverlay(
+          ctx,
+          vp,
+          sixArrangement,
+          primaryQ,
+          sixPointsMedian
+        );
       }
 
       if (preset.fixedMarkers && preset.fixedMarkers.length > 0) {
@@ -214,6 +230,8 @@ export function Stage({
     return () => window.removeEventListener("resize", renderFrame);
   }, [
     preset,
+    effectiveDomain,
+    sixPointsMedian,
     startPoint,
     methodOverlays,
     bowlK,
@@ -228,7 +246,7 @@ export function Stage({
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    const vp = getPlotViewport(canvas.width, canvas.height, preset.domain);
+    const vp = getPlotViewport(canvas.width, canvas.height, effectiveDomain);
     if (
       sx < vp.padLeft ||
       sx > vp.padLeft + vp.plotW ||
@@ -317,6 +335,8 @@ export function Stage({
         onOutlierStartChange={onOutlierStartChange}
         showNotABowl={showNotABowl}
         onToggleNotABowl={onToggleNotABowl}
+        zoomToAction={zoomToAction}
+        onToggleZoom={onToggleZoom}
       />
     </section>
   );

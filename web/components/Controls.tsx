@@ -26,6 +26,8 @@ interface ControlsProps {
   onOutlierStartChange: (idx: number) => void;
   showNotABowl: boolean;
   onToggleNotABowl: () => void;
+  zoomToAction: boolean;
+  onToggleZoom: () => void;
 }
 
 export function Controls({
@@ -45,6 +47,8 @@ export function Controls({
   onOutlierStartChange,
   showNotABowl,
   onToggleNotABowl,
+  zoomToAction,
+  onToggleZoom,
 }: ControlsProps) {
   // Log scale for quartic L in [1, 1000]: slider value u in [0, 1000] -> L = 10^(3 * u / 1000)
   const sliderVal = Math.round((Math.log10(Math.max(1, quarticL)) / 3) * 1000);
@@ -89,6 +93,30 @@ export function Controls({
               {s}×
             </Button>
           ))}
+        </div>
+
+        <div className="dp-controls-group" style={{ marginLeft: "6px" }}>
+          <span className="dp-control-label">VIEW</span>
+          <Button
+            variant="chip"
+            active={zoomToAction}
+            onClick={() => {
+              if (!zoomToAction) onToggleZoom();
+            }}
+            aria-pressed={zoomToAction}
+          >
+            ZOOM PATH
+          </Button>
+          <Button
+            variant="chip"
+            active={!zoomToAction}
+            onClick={() => {
+              if (zoomToAction) onToggleZoom();
+            }}
+            aria-pressed={!zoomToAction}
+          >
+            FULL MAP
+          </Button>
         </div>
       </div>
 

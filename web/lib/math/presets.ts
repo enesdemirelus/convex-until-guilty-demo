@@ -90,6 +90,7 @@ export function makeBowlPreset(k: number = 100): PresetConfig {
     grad: (z: Vec) => [z[0], k * z[1]],
     minHessianEig: () => Math.min(1, k),
     axisLabels: ["X", "Y"],
+    fixedMarkers: [{ label: "MIN (0, 0)", point: [0, 0], kind: "diamond" }],
   };
 }
 
@@ -178,6 +179,10 @@ export function makeSaddlePreset(): PresetConfig {
       return Math.min(3 * x * x - 1, 1);
     },
     axisLabels: ["X", "Y"],
+    fixedMarkers: [
+      { label: "SADDLE (0, 0)", point: [0, 0], kind: "square" },
+      { label: "MIN (1, 0)", point: [1, 0], kind: "diamond" },
+    ],
     alpha,
     eta,
   };

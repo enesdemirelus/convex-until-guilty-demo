@@ -194,9 +194,11 @@ export function drawAxes(
   ctx.font = `800 12px ${THEME.typography.face}`;
 
   // X ticks (3 ticks: min, mid, max)
+  const spanX = Math.abs(domain.xMax - domain.xMin);
+  const spanY = Math.abs(domain.yMax - domain.yMin);
   const xTicks = [
     domain.xMin,
-    0 >= domain.xMin && 0 <= domain.xMax
+    0 >= domain.xMin + spanX * 0.15 && 0 <= domain.xMax - spanX * 0.15
       ? 0
       : 0.5 * (domain.xMin + domain.xMax),
     domain.xMax,
@@ -209,13 +211,13 @@ export function drawAxes(
     ctx.moveTo(sx, padTop + plotH);
     ctx.lineTo(sx, padTop + plotH + 5);
     ctx.stroke();
-    ctx.fillText(formatTick(xt), sx, padTop + plotH + 7);
+    ctx.fillText(formatTick(xt, spanX), sx, padTop + plotH + 7);
   }
 
   // Y ticks
   const yTicks = [
     domain.yMin,
-    0 >= domain.yMin && 0 <= domain.yMax
+    0 >= domain.yMin + spanY * 0.15 && 0 <= domain.yMax - spanY * 0.15
       ? 0
       : 0.5 * (domain.yMin + domain.yMax),
     domain.yMax,
@@ -228,7 +230,7 @@ export function drawAxes(
     ctx.moveTo(padLeft - 5, sy);
     ctx.lineTo(padLeft, sy);
     ctx.stroke();
-    ctx.fillText(formatTick(yt), padLeft - 7, sy);
+    ctx.fillText(formatTick(yt, spanY), padLeft - 7, sy);
   }
 
   // Axis names
@@ -247,9 +249,10 @@ export function drawAxes(
   ctx.restore();
 }
 
-function formatTick(v: number): string {
+function formatTick(v: number, span: number = 10): string {
   if (Math.abs(v) < 1e-9) return "0";
   if (Math.abs(v) >= 10 || Number.isInteger(v)) return v.toFixed(0);
+  if (span < 1.8) return v.toFixed(2);
   return v.toFixed(1);
 }
 
@@ -340,7 +343,8 @@ export function drawSixPointsOverlay(
   ctx: CanvasRenderingContext2D,
   vp: PlotViewport,
   arrangement: SixPointArrangementId,
-  currentQ: Vec
+  currentQ: Vec,
+  medianPos?: Vec
 ) {
   const pts = SIX_POINT_ARRANGEMENTS[arrangement].points;
   const [qx, qy] = worldToScreen(vp, currentQ[0], currentQ[1]);
@@ -363,13 +367,53 @@ export function drawSixPointsOverlay(
   }
   ctx.setLineDash([]);
 
-  // Draw the 6 store points as bold square markers with numbers
+  // Geometric median target marker
+  if (medianPos && medianPos.length >= 2) {
+    const [mx, my] = worldToScreen(vp, medianPos[0], medianPos[1]);
+    drawDiamond(ctx, mx, my, 9, THEME.colors.field);
+    const tx = Math.max(
+      vp.padLeft + 62,
+      Math.min(vp.padLeft + vp.plotW - 62, mx - 58)
+    );
+    const ty = Math.max(
+      vp.padTop + 16,
+      Math.min(vp.padTop + vp.plotH - 16, my - 22)
+    );
+    drawTag(
+      ctx,
+      `MEDIAN (${medianPos[0].toFixed(2)}, ${medianPos[1].toFixed(2)})`,
+      tx,
+      ty,
+      THEME.colors.field
+    );
+  }
+
+  // Draw the 6 store points as bold square markers with numbers.
+  // If zoomed in so a store is outside the plot frame, pin its P_i badge along the inner frame edge along the ray from Q.
+  const minX = vp.padLeft + 14;
+  const maxX = vp.padLeft + vp.plotW - 14;
+  const minY = vp.padTop + 14;
+  const maxY = vp.padTop + vp.plotH - 14;
+
   for (let i = 0; i < pts.length; i++) {
-    const [px, py] = worldToScreen(vp, pts[i][0], pts[i][1]);
+    let [px, py] = worldToScreen(vp, pts[i][0], pts[i][1]);
+    const isOutside = px < minX || px > maxX || py < minY || py > maxY;
+    if (isOutside) {
+      const dx = px - qx;
+      const dy = py - qy;
+      let tMin = 1.0;
+      if (dx > 1e-6 && maxX > qx) tMin = Math.min(tMin, (maxX - qx) / dx);
+      if (dx < -1e-6 && minX < qx) tMin = Math.min(tMin, (minX - qx) / dx);
+      if (dy > 1e-6 && maxY > qy) tMin = Math.min(tMin, (maxY - qy) / dy);
+      if (dy < -1e-6 && minY < qy) tMin = Math.min(tMin, (minY - qy) / dy);
+      px = Math.max(minX, Math.min(maxX, qx + dx * Math.max(0, tMin)));
+      py = Math.max(minY, Math.min(maxY, qy + dy * Math.max(0, tMin)));
+    }
+
     const sz = 18;
     ctx.fillStyle = THEME.colors.ink;
     ctx.fillRect(px - sz / 2 + 2, py - sz / 2 + 2, sz, sz);
-    ctx.fillStyle = THEME.colors.contrast;
+    ctx.fillStyle = isOutside ? THEME.colors.ground : THEME.colors.contrast;
     ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
     ctx.strokeStyle = THEME.colors.ink;
     ctx.lineWidth = 2;
@@ -395,15 +439,26 @@ export function drawFixedMarkers(
   ctx.rect(vp.padLeft, vp.padTop, vp.plotW, vp.plotH);
   ctx.clip();
 
+  const clampX = (x: number) =>
+    Math.max(vp.padLeft + 54, Math.min(vp.padLeft + vp.plotW - 54, x));
+  const clampY = (y: number) =>
+    Math.max(vp.padTop + 16, Math.min(vp.padTop + vp.plotH - 16, y));
+
   for (const m of markers) {
     const [sx, sy] = worldToScreen(vp, m.point[0], m.point[1]);
 
     if (m.kind === "star") {
       // True rule ★ black (3, 4) -> offset tag lower-right
       drawStar(ctx, sx, sy, 9, THEME.colors.ink, THEME.colors.emphasis);
-      drawTag(ctx, m.label, sx + 48, sy + 18, THEME.colors.contrast);
+      drawTag(
+        ctx,
+        m.label,
+        clampX(sx + 52),
+        clampY(sy + 20),
+        THEME.colors.contrast
+      );
     } else if (m.kind === "square") {
-      // Least squares ■ red (2.59, 4.65) -> offset tag upper-left
+      // Least squares / Saddle ■ red -> offset tag upper-left
       const sz = 14;
       ctx.fillStyle = THEME.colors.ink;
       ctx.fillRect(sx - sz / 2 + 2, sy - sz / 2 + 2, sz, sz);
@@ -412,11 +467,23 @@ export function drawFixedMarkers(
       ctx.strokeStyle = THEME.colors.ink;
       ctx.lineWidth = 2;
       ctx.strokeRect(sx - sz / 2, sy - sz / 2, sz, sz);
-      drawTag(ctx, m.label, sx - 56, sy - 20, THEME.colors.contrast);
+      drawTag(
+        ctx,
+        m.label,
+        clampX(sx - 56),
+        clampY(sy - 20),
+        THEME.colors.contrast
+      );
     } else if (m.kind === "diamond") {
-      // Robust fit ◆ violet (2.85, 4.14) -> offset tag lower-left
+      // Robust fit / Minimum ◆ violet -> offset tag lower-left
       drawDiamond(ctx, sx, sy, 9, THEME.colors.field);
-      drawTag(ctx, m.label, sx - 64, sy + 20, THEME.colors.field);
+      drawTag(
+        ctx,
+        m.label,
+        clampX(sx - 60),
+        clampY(sy + 22),
+        THEME.colors.field
+      );
     }
   }
 
@@ -518,6 +585,18 @@ export function drawNotABowlLegendChip(
   ctx.restore();
 }
 
+function getBowlTrackOffsetY(
+  preset: PresetConfig,
+  methodId: MethodId,
+  pt: Vec
+): number {
+  if (preset.id !== "bowl" || pt.length < 2) return 0;
+  if (Math.abs(pt[1]) > 0.05) return 0;
+  if (methodId === "gd") return -6;
+  if (methodId === "nesterov") return 6;
+  return 0;
+}
+
 export function drawTrail(
   ctx: CanvasRenderingContext2D,
   vp: PlotViewport,
@@ -532,9 +611,10 @@ export function drawTrail(
   ctx.rect(vp.padLeft, vp.padTop, vp.plotW, vp.plotH);
   ctx.clip();
 
-  const screenPts = points.map((pt) => {
+  const screenPts: Array<[number, number]> = points.map((pt) => {
     const wy = preset.view === "curve" ? preset.f(pt) : pt[1];
-    return worldToScreen(vp, pt[0], wy);
+    const [sx, sy] = worldToScreen(vp, pt[0], wy);
+    return [sx, sy + getBowlTrackOffsetY(preset, methodId, pt)];
   });
 
   if (methodId === "gd") {
@@ -571,6 +651,28 @@ export function drawTrail(
     ctx.setLineDash([]);
   }
 
+  // Draw crisp square step ticks along the trail (spaced >= 12px apart)
+  const tickFill =
+    methodId === "gd" || methodId === "alg3"
+      ? THEME.colors.signal
+      : methodId === "momentum"
+      ? THEME.colors.contrast
+      : THEME.colors.emphasis;
+  let lastTickX = -999;
+  let lastTickY = -999;
+  for (let i = 0; i < screenPts.length - 1; i++) {
+    const [tx, ty] = screenPts[i];
+    if (Math.hypot(tx - lastTickX, ty - lastTickY) >= 12) {
+      ctx.fillStyle = tickFill;
+      ctx.fillRect(Math.round(tx - 3), Math.round(ty - 3), 6, 6);
+      ctx.strokeStyle = THEME.colors.ink;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(Math.round(tx - 3), Math.round(ty - 3), 6, 6);
+      lastTickX = tx;
+      lastTickY = ty;
+    }
+  }
+
   ctx.restore();
 }
 
@@ -598,7 +700,7 @@ export function drawBall(
   const wy = preset.view === "curve" ? preset.f(pos) : pos[1];
   const [rawX, rawY] = worldToScreen(vp, pos[0], wy);
   const sx = rawX + offsetPx[0];
-  const sy = rawY + offsetPx[1];
+  const sy = rawY + offsetPx[1] + getBowlTrackOffsetY(preset, methodId, pos);
 
   // Clamp inside viewport check
   if (
@@ -764,7 +866,18 @@ export function drawEscapeArrow(
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  drawTag(ctx, "ESCAPED ↗", ex + 46, ey - 16, THEME.colors.field);
+  const clampX = (x: number) =>
+    Math.max(vp.padLeft + 46, Math.min(vp.padLeft + vp.plotW - 46, x));
+  const clampY = (y: number) =>
+    Math.max(vp.padTop + 16, Math.min(vp.padTop + vp.plotH - 16, y));
+
+  drawTag(
+    ctx,
+    "ESCAPED ↗",
+    clampX(ex + 46),
+    clampY(ey - 16),
+    THEME.colors.field
+  );
 
   ctx.restore();
 }

@@ -8,6 +8,7 @@ import { SpeedOption } from "@/components/Controls";
 import { LedgerRowData, METHOD_META } from "@/components/Ledger";
 import { BadgeStatus } from "@/components/Badge";
 import {
+  Domain2D,
   MethodId,
   OUTLIER_STARTS,
   PresetConfig,
@@ -29,7 +30,7 @@ import {
   momentum,
   nesterovAgd,
 } from "@/lib/math/algorithms";
-import { Vec, add, norm, scale, sub } from "@/lib/math/vec";
+import { Vec, add, dist, norm, scale, sub } from "@/lib/math/vec";
 
 interface ComputedMethodRun {
   id: MethodId;
@@ -37,6 +38,7 @@ interface ComputedMethodRun {
   traj?: TrajectoryResult;
   guarded?: GuardedResult;
   points: Vec[];
+  stepSubPaths?: Vec[][];
   slopes: number[];
   finalSteps: number;
   finalStatus: BadgeStatus;
@@ -44,6 +46,7 @@ interface ComputedMethodRun {
   witnessV?: Vec;
   escapeFrom?: Vec;
   escapeTo?: Vec;
+  escapeStepIdx?: number;
   flewOffX?: number;
 }
 
@@ -60,6 +63,18 @@ function isOutOfDomain(preset: PresetConfig, pt: Vec): boolean {
     }
   }
   return false;
+}
+
+function simplifyPolyline(pts: Vec[], minStepDist: number = 1e-3): Vec[] {
+  if (pts.length <= 2) return pts;
+  const out: Vec[] = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    if (dist(pts[i], out[out.length - 1]) >= minStepDist) {
+      out.push(pts[i]);
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
 }
 
 function computeMethodRun(
@@ -163,11 +178,21 @@ function computeMethodRun(
     eta
   );
 
-  // Find the first guilty round that used exploit_nc (or any guilty round) to show the escape arrow
   let escapeFrom: Vec | undefined;
   let escapeTo: Vec | undefined;
+  let escapeStepIdx: number | undefined;
 
-  for (const step of res.outerSteps) {
+  const stepSubPaths: Vec[][] = [];
+  for (let i = 0; i < res.outerSteps.length; i++) {
+    const step = res.outerSteps[i];
+    const pStart = res.path[i];
+    const pEnd = res.path[i + 1];
+    if (step.action === "converged" && step.inner.ys.length > 2) {
+      stepSubPaths.push(simplifyPolyline([pStart, ...step.inner.ys, pEnd], 2e-3));
+    } else {
+      stepSubPaths.push([pStart, pEnd]);
+    }
+
     if (
       step.inner.status === "guilty" &&
       step.inner.u &&
@@ -177,6 +202,7 @@ function computeMethodRun(
       if (step.action === "exploit_nc" || !escapeFrom) {
         escapeFrom = step.inner.u;
         escapeTo = step.escapeTarget;
+        escapeStepIdx = i + 1;
       }
     }
   }
@@ -189,11 +215,13 @@ function computeMethodRun(
     kind: "guarded",
     guarded: res,
     points: res.path,
+    stepSubPaths,
     slopes,
     finalSteps: res.iters,
     finalStatus: usedGuilty ? "escaped" : "converged",
     escapeFrom,
     escapeTo,
+    escapeStepIdx,
   };
 }
 
@@ -201,6 +229,366 @@ function interpolateVec(a: Vec, b: Vec, t: number): Vec {
   if (t <= 0) return a;
   if (t >= 1) return b;
   return add(a, scale(sub(b, a), t));
+}
+
+function samplePolyline(
+  poly: Vec[],
+  t: number
+): { pos: Vec; prefix: Vec[] } {
+  if (poly.length === 0) return { pos: [0, 0], prefix: [] };
+  if (poly.length === 1 || t <= 0) return { pos: poly[0], prefix: [poly[0]] };
+  if (t >= 1) return { pos: poly[poly.length - 1], prefix: poly };
+
+  const segLengths: number[] = [];
+  let totalLen = 0;
+  for (let i = 0; i < poly.length - 1; i++) {
+    const d = dist(poly[i], poly[i + 1]);
+    segLengths.push(d);
+    totalLen += d;
+  }
+  if (totalLen < 1e-12) {
+    return { pos: poly[poly.length - 1], prefix: [poly[0], poly[poly.length - 1]] };
+  }
+
+  const target = t * totalLen;
+  let acc = 0;
+  const prefix: Vec[] = [poly[0]];
+  for (let i = 0; i < segLengths.length; i++) {
+    const seg = segLengths[i];
+    if (acc + seg >= target) {
+      const localT = seg > 1e-12 ? (target - acc) / seg : 1;
+      const pos = interpolateVec(poly[i], poly[i + 1], localT);
+      prefix.push(pos);
+      return { pos, prefix };
+    }
+    acc += seg;
+    prefix.push(poly[i + 1]);
+  }
+  return { pos: poly[poly.length - 1], prefix: poly };
+}
+
+/**
+ * Computes a zoomed-in domain that frames the active trajectories and reference markers
+ * closely so the race fills the plot instead of looking tiny or far away.
+ */
+function computeActionDomain(
+  preset: PresetConfig,
+  startPoint: Vec,
+  runs: ComputedMethodRun[]
+): Domain2D {
+  if (preset.view === "curve") {
+    const sx = startPoint[0];
+    const xMin = Math.min(-0.4, sx - 0.6);
+    const xMax = Math.max(4.5, sx + 0.8);
+    const fStart = preset.f([sx]);
+    const yMax = Math.min(2000, Math.max(420, fStart * 1.12));
+    return { xMin, xMax, yMin: 0, yMax };
+  }
+
+  let xMin = startPoint[0];
+  let xMax = startPoint[0];
+  let yMin = startPoint[1];
+  let yMax = startPoint[1];
+
+  const includePt = (pt: Vec | undefined) => {
+    if (!pt || pt.length < 2) return;
+    if (isOutOfDomain(preset, pt)) return;
+    if (pt[0] < xMin) xMin = pt[0];
+    if (pt[0] > xMax) xMax = pt[0];
+    if (pt[1] < yMin) yMin = pt[1];
+    if (pt[1] > yMax) yMax = pt[1];
+  };
+
+  for (const m of preset.fixedMarkers ?? []) {
+    includePt(m.point);
+  }
+
+  for (const run of runs) {
+    if (run.finalStatus === "flewoff") continue;
+    for (const pt of run.points) {
+      includePt(pt);
+    }
+    includePt(run.witnessU);
+    includePt(run.witnessV);
+    includePt(run.escapeTo);
+  }
+
+  const rawW = xMax - xMin;
+  const rawH = yMax - yMin;
+
+  let minSpanX = 0.85;
+  let minSpanY = 0.85;
+  let padFrac = 0.24;
+
+  if (preset.id === "sixpoints") {
+    minSpanX = 0.75;
+    minSpanY = 0.75;
+    padFrac = 0.38;
+  } else if (preset.id === "outlier") {
+    minSpanX = 6.0;
+    minSpanY = 5.5;
+    padFrac = 0.20;
+  } else if (preset.id === "bowl") {
+    minSpanX = 1.0;
+    minSpanY = 1.2;
+    padFrac = 0.20;
+  } else if (preset.id === "saddle") {
+    minSpanX = 1.1;
+    minSpanY = 1.1;
+    padFrac = 0.24;
+  }
+
+  const cx = 0.5 * (xMin + xMax);
+  const cy = 0.5 * (yMin + yMax);
+  const spanX = Math.max(minSpanX, rawW * (1 + 2 * padFrac));
+  const spanY = Math.max(minSpanY, rawH * (1 + 2 * padFrac));
+
+  return {
+    xMin: Math.max(preset.domain.xMin, cx - spanX / 2),
+    xMax: Math.min(preset.domain.xMax, cx + spanX / 2),
+    yMin: Math.max(preset.domain.yMin, cy - spanY / 2),
+    yMax: Math.min(preset.domain.yMax, cy + spanY / 2),
+  };
+}
+
+/**
+ * Builds a cumulative timestamp array `cumTimes[0 .. N]` over `durationSec`
+ * using compressed screen displacement + active step weighting + tail step weighting.
+ */
+function buildCumTimes(
+  stepDists: number[],
+  remDists: number[],
+  durationSec: number,
+  exponent: number = 0.58
+): number[] {
+  const N = stepDists.length;
+  if (N === 0) return [0];
+
+  const totalRawD = Math.max(1e-9, stepDists.reduce((a, b) => a + b, 0));
+  const compDists = stepDists.map((d) => Math.pow(Math.max(0, d), exponent));
+  const totalCompD = Math.max(1e-9, compDists.reduce((a, b) => a + b, 0));
+
+  const activeFlags: number[] = remDists.map((r) =>
+    r > totalRawD * 0.015 ? 1 : 0
+  );
+  const nActive = Math.max(1, activeFlags.reduce((a, b) => a + b, 0));
+  const nTail = Math.max(1, N - nActive);
+
+  const weights = compDists.map((cd, k) => {
+    const wDist = 0.72 * (cd / totalCompD);
+    const wStep = activeFlags[k] ? 0.20 / nActive : 0.08 / nTail;
+    return wDist + wStep;
+  });
+
+  const wSum = Math.max(1e-9, weights.reduce((a, b) => a + b, 0));
+  const cum: number[] = [0];
+  let acc = 0;
+  for (let k = 0; k < N; k++) {
+    acc += (weights[k] / wSum) * durationSec;
+    cum.push(acc);
+  }
+  return cum;
+}
+
+function lookupStepCursor(cumTimes: number[], t: number): number {
+  const lastIdx = cumTimes.length - 1;
+  if (lastIdx <= 0 || t <= 0) return 0;
+  if (t >= cumTimes[lastIdx]) return lastIdx;
+
+  // Binary search for largest k with cumTimes[k] <= t
+  let lo = 0;
+  let hi = lastIdx;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (cumTimes[mid] <= t) lo = mid;
+    else hi = mid;
+  }
+  const t0 = cumTimes[lo];
+  const t1 = cumTimes[lo + 1];
+  const frac = t1 > t0 + 1e-9 ? (t - t0) / (t1 - t0) : 1;
+  return lo + Math.max(0, Math.min(1, frac));
+}
+
+interface RaceSchedule {
+  totalDuration: number;
+  getMethodCursor: (methodId: MethodId, elapsedSec: number) => number;
+}
+
+function buildRaceSchedule(
+  preset: PresetConfig,
+  domain: Domain2D,
+  runs: ComputedMethodRun[]
+): RaceSchedule {
+  const spanX = Math.max(1e-6, domain.xMax - domain.xMin);
+  const spanY = Math.max(1e-6, domain.yMax - domain.yMin);
+
+  const normDist = (a: Vec, b: Vec): number => {
+    const dx = (b[0] - a[0]) / spanX;
+    const dy =
+      preset.view === "curve"
+        ? (preset.f(b) - preset.f(a)) / spanY
+        : ((b[1] ?? 0) - (a[1] ?? 0)) / spanY;
+    return Math.hypot(dx, dy);
+  };
+
+  // Special case: flew off on step 1 (Quartic L = 5)
+  if (runs.every((r) => r.finalStatus === "flewoff")) {
+    const totalDuration = 1.4;
+    return {
+      totalDuration,
+      getMethodCursor: (_id, t) => Math.min(1, t / totalDuration),
+    };
+  }
+
+  // Case A: Saddle (Algorithm 1 catches saddle in 29 inner steps while Algorithm 3 escapes in outer step 2 and reaches (1, 0) in 20 outer steps)
+  if (preset.id === "saddle") {
+    const alg1 = runs.find((r) => r.id === "alg1");
+    const alg3 = runs.find((r) => r.id === "alg3");
+    if (alg1 && alg3) {
+      const phase1Dur = 3.2;
+      const phase2Dur = 3.4;
+      const totalDuration = phase1Dur + phase2Dur;
+
+      // Alg 1 schedule over phase1Dur (steps 0..29)
+      const d1: number[] = [];
+      const rem1: number[] = [];
+      const end1 = alg1.points[alg1.points.length - 1];
+      for (let k = 0; k < alg1.finalSteps; k++) {
+        d1.push(normDist(alg1.points[k], alg1.points[k + 1]));
+        rem1.push(normDist(alg1.points[k], end1));
+      }
+      const cumAlg1 = buildCumTimes(d1, rem1, phase1Dur, 0.6);
+
+      // Alg 3 schedule: outer steps 0..escapeStep (2) over phase1Dur, then escapeStep..20 over phase2Dur
+      const escStep = Math.min(alg3.finalSteps, alg3.escapeStepIdx ?? 2);
+      const d3a: number[] = [];
+      const rem3a: number[] = [];
+      for (let k = 0; k < escStep; k++) {
+        d3a.push(normDist(alg3.points[k], alg3.points[k + 1]));
+        rem3a.push(normDist(alg3.points[k], alg3.points[escStep]));
+      }
+      const cum3a = buildCumTimes(d3a, rem3a, phase1Dur, 0.6);
+
+      const d3b: number[] = [];
+      const rem3b: number[] = [];
+      const end3 = alg3.points[alg3.points.length - 1];
+      for (let k = escStep; k < alg3.finalSteps; k++) {
+        d3b.push(normDist(alg3.points[k], alg3.points[k + 1]));
+        rem3b.push(normDist(alg3.points[k], end3));
+      }
+      const cum3b = buildCumTimes(d3b, rem3b, phase2Dur, 0.58);
+
+      return {
+        totalDuration,
+        getMethodCursor: (methodId, t) => {
+          if (methodId === "alg1") {
+            return lookupStepCursor(cumAlg1, t);
+          }
+          if (methodId === "alg3") {
+            if (t <= phase1Dur) {
+              return lookupStepCursor(cum3a, t);
+            }
+            return escStep + lookupStepCursor(cum3b, t - phase1Dur);
+          }
+          return 0;
+        },
+      };
+    }
+  }
+
+  // Case B: Shared-step race (Bowl, SixPoints, Quartic, Outlier)
+  // If there is both a fast method (e.g. Nesterov/Alg1) and a much slower method (e.g. GD),
+  // split into Phase 1 (0 .. fastSteps) and Phase 2 (fastSteps .. maxSteps) so the fast race is paced clearly.
+  const validRuns = runs.filter((r) => r.finalStatus !== "flewoff");
+  const stepCounts = validRuns.map((r) => r.finalSteps).sort((a, b) => a - b);
+  const minSteps = stepCounts[0] ?? 1;
+  const maxSteps = stepCounts[stepCounts.length - 1] ?? 1;
+
+  if (maxSteps > minSteps * 1.4 && validRuns.length > 1) {
+    const phase1Dur = 4.6;
+    const phase2Dur = 2.6;
+    const totalDuration = phase1Dur + phase2Dur;
+
+    const fastRuns = validRuns.filter((r) => r.finalSteps <= minSteps * 1.25);
+    const d1: number[] = [];
+    const rem1: number[] = [];
+    for (let k = 0; k < minSteps; k++) {
+      let maxD = 0;
+      let maxRem = 0;
+      for (const r of fastRuns) {
+        if (k < r.finalSteps) {
+          const stepD = normDist(r.points[k], r.points[k + 1]);
+          const remD = normDist(r.points[k], r.points[r.points.length - 1]);
+          if (stepD > maxD) maxD = stepD;
+          if (remD > maxRem) maxRem = remD;
+        }
+      }
+      d1.push(maxD);
+      rem1.push(maxRem);
+    }
+    const cum1 = buildCumTimes(d1, rem1, phase1Dur, 0.55);
+
+    const slowRuns = validRuns.filter((r) => r.finalSteps > minSteps);
+    const d2: number[] = [];
+    const rem2: number[] = [];
+    for (let k = minSteps; k < maxSteps; k++) {
+      let maxD = 0;
+      let maxRem = 0;
+      for (const r of slowRuns) {
+        if (k < r.finalSteps) {
+          const stepD = normDist(r.points[k], r.points[k + 1]);
+          const remD = normDist(r.points[k], r.points[r.points.length - 1]);
+          if (stepD > maxD) maxD = stepD;
+          if (remD > maxRem) maxRem = remD;
+        }
+      }
+      d2.push(maxD);
+      rem2.push(maxRem);
+    }
+    const cum2 = buildCumTimes(d2, rem2, phase2Dur, 0.65);
+
+    return {
+      totalDuration,
+      getMethodCursor: (methodId, t) => {
+        const run = runs.find((r) => r.id === methodId);
+        const cap = run?.finalSteps ?? maxSteps;
+        if (t <= phase1Dur) {
+          return Math.min(cap, lookupStepCursor(cum1, t));
+        }
+        return Math.min(cap, minSteps + lookupStepCursor(cum2, t - phase1Dur));
+      },
+    };
+  }
+
+  // Case C: Single phase shared-step schedule (Quartic, Outlier)
+  const totalDuration = preset.id === "outlier" ? 6.6 : 5.4;
+  const exponent = preset.id === "outlier" ? 0.78 : 0.55;
+  const dAll: number[] = [];
+  const remAll: number[] = [];
+  for (let k = 0; k < maxSteps; k++) {
+    let maxD = 0;
+    let maxRem = 0;
+    for (const r of validRuns) {
+      if (k < r.finalSteps) {
+        const stepD = normDist(r.points[k], r.points[k + 1]);
+        const remD = normDist(r.points[k], r.points[r.points.length - 1]);
+        if (stepD > maxD) maxD = stepD;
+        if (remD > maxRem) maxRem = remD;
+      }
+    }
+    dAll.push(maxD);
+    remAll.push(maxRem);
+  }
+  const cumAll = buildCumTimes(dAll, remAll, totalDuration, exponent);
+
+  return {
+    totalDuration,
+    getMethodCursor: (methodId, t) => {
+      const run = runs.find((r) => r.id === methodId);
+      const cap = run?.finalSteps ?? maxSteps;
+      return Math.min(cap, lookupStepCursor(cumAll, t));
+    },
+  };
 }
 
 function buildResultFact(
@@ -253,12 +641,13 @@ export default function Page() {
     useState<SixPointArrangementId>("ellipse");
   const [outlierStartIdx, setOutlierStartIdx] = useState<number>(2); // default (20, 20)
   const [showNotABowl, setShowNotABowl] = useState<boolean>(true);
+  const [zoomToAction, setZoomToAction] = useState<boolean>(true);
   const [customStart, setCustomStart] = useState<Vec | null>(null);
 
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [isFinished, setIsFinished] = useState<boolean>(false);
   const [speed, setSpeed] = useState<SpeedOption>(1);
-  const [stepCursor, setStepCursor] = useState<number>(0);
+  const [elapsedSec, setElapsedSec] = useState<number>(0);
   const [reducedMotion, setReducedMotion] = useState<boolean>(false);
   const [liveAnnouncement, setLiveAnnouncement] = useState<string>("");
 
@@ -278,9 +667,20 @@ export default function Page() {
     );
   }, [preset, startPoint]);
 
-  const maxSteps = useMemo(() => {
-    return Math.max(1, ...computedRuns.map((r) => r.finalSteps));
-  }, [computedRuns]);
+  const effectiveDomain: Domain2D = useMemo(() => {
+    if (!zoomToAction) return preset.domain;
+    return computeActionDomain(preset, startPoint, computedRuns);
+  }, [preset, startPoint, computedRuns, zoomToAction]);
+
+  const sixPointsMedian: Vec | undefined = useMemo(() => {
+    if (preset.id !== "sixpoints") return undefined;
+    const alg1 = computedRuns.find((r) => r.id === "alg1");
+    return alg1 ? alg1.points[alg1.points.length - 1] : undefined;
+  }, [preset.id, computedRuns]);
+
+  const raceSchedule = useMemo(() => {
+    return buildRaceSchedule(preset, effectiveDomain, computedRuns);
+  }, [preset, effectiveDomain, computedRuns]);
 
   // Detect prefers-reduced-motion
   useEffect(() => {
@@ -291,7 +691,6 @@ export default function Page() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Animation loop with adaptive steps per frame so even 13,809 steps finishes in ~3.5 seconds at 1x
   const rafRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number | null>(null);
 
@@ -303,30 +702,25 @@ export default function Page() {
     }
 
     if (reducedMotion) {
-      setStepCursor(maxSteps);
+      setElapsedSec(raceSchedule.totalDuration);
       setIsRunning(false);
       setIsFinished(true);
       return;
     }
 
-    // Target duration at 1x: ~3.5s for <= 60 steps, ~4.8s for <= 300 steps, ~5.8s for <= 2000 steps, ~6.8s for 13,809 steps
-    const baseDurationSec =
-      maxSteps <= 60 ? 3.5 : maxSteps <= 300 ? 4.8 : maxSteps <= 2000 ? 5.8 : 6.8;
-    const stepsPerSecond = (maxSteps / baseDurationSec) * speed;
-
     const tick = (now: number) => {
       if (lastTimeRef.current === null) {
         lastTimeRef.current = now;
       }
-      const dt = Math.min(0.1, (now - lastTimeRef.current) / 1000);
+      const dt = Math.min(0.05, (now - lastTimeRef.current) / 1000);
       lastTimeRef.current = now;
 
-      setStepCursor((prev) => {
-        const next = prev + stepsPerSecond * dt;
-        if (next >= maxSteps) {
+      setElapsedSec((prev) => {
+        const next = prev + dt * speed;
+        if (next >= raceSchedule.totalDuration) {
           setIsRunning(false);
           setIsFinished(true);
-          return maxSteps;
+          return raceSchedule.totalDuration;
         }
         return next;
       });
@@ -338,7 +732,7 @@ export default function Page() {
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
-  }, [isRunning, maxSteps, speed, reducedMotion]);
+  }, [isRunning, speed, reducedMotion, raceSchedule]);
 
   // Announce outcomes via aria-live when finished
   useEffect(() => {
@@ -364,7 +758,7 @@ export default function Page() {
   const resetStage = () => {
     setIsRunning(false);
     setIsFinished(false);
-    setStepCursor(0);
+    setElapsedSec(0);
     setLiveAnnouncement("");
   };
 
@@ -375,9 +769,9 @@ export default function Page() {
   };
 
   const handleRunPause = () => {
-    if (isFinished || stepCursor >= maxSteps) {
+    if (isFinished || elapsedSec >= raceSchedule.totalDuration) {
       setIsFinished(false);
-      setStepCursor(0);
+      setElapsedSec(0);
       setIsRunning(true);
     } else {
       setIsRunning((r) => !r);
@@ -400,35 +794,68 @@ export default function Page() {
     return valid[0].id;
   }, [isFinished, computedRuns]);
 
-  // Build live Ledger rows and Canvas overlays for current stepCursor
+  // Build live Ledger rows and Canvas overlays for current elapsedSec
   const { rows, overlays } = useMemo(() => {
     const outRows: LedgerRowData[] = [];
     const outOverlays: MethodOverlayRenderData[] = [];
 
     for (const run of computedRuns) {
       const meta = METHOD_META[run.id];
-      const clampedStep = Math.min(stepCursor, run.finalSteps);
-      const idxFloor = Math.floor(clampedStep);
+      const clampedCursor = isFinished
+        ? run.finalSteps
+        : Math.min(
+            run.finalSteps,
+            raceSchedule.getMethodCursor(run.id, elapsedSec)
+          );
+      const idxFloor = Math.floor(clampedCursor);
       const idxCeil = Math.min(run.points.length - 1, idxFloor + 1);
-      const frac = clampedStep - idxFloor;
+      const frac = clampedCursor - idxFloor;
 
       const methodDone =
-        isFinished || (stepCursor >= run.finalSteps && stepCursor > 0);
-      const methodAtRest = !isRunning && !isFinished && stepCursor === 0;
+        isFinished || (clampedCursor >= run.finalSteps - 1e-6 && elapsedSec > 0);
+      const methodAtRest = !isRunning && !isFinished && elapsedSec === 0;
 
-      // Clamp flew-off point so we don't draw a line 100 units off screen
-      const maxDrawIdx =
-        run.finalStatus === "flewoff" ? Math.min(1, idxFloor) : idxFloor;
-      const trail = run.points.slice(0, maxDrawIdx + 1);
-      const currentPos =
-        run.finalStatus === "flewoff" && idxFloor >= 1
-          ? run.points[0]
-          : reducedMotion
+      let trail: Vec[] = [];
+      let currentPos: Vec = run.points[0];
+
+      if (run.finalStatus === "flewoff") {
+        // Animate ball flying toward right edge of domain before showing FLEW OFF tile
+        const edgeX = effectiveDomain.xMax;
+        const flyT = Math.min(1, clampedCursor);
+        currentPos = methodDone
+          ? [edgeX]
+          : [run.points[0][0] + (edgeX - run.points[0][0]) * flyT];
+        trail = [run.points[0], currentPos];
+      } else if (run.stepSubPaths && run.stepSubPaths.length > 0) {
+        // Guarded Algorithm 3 with smooth inner sub-paths
+        for (let k = 0; k < idxFloor && k < run.stepSubPaths.length; k++) {
+          const sp = run.stepSubPaths[k];
+          for (let j = 0; j < sp.length; j++) {
+            if (trail.length === 0 || dist(trail[trail.length - 1], sp[j]) > 1e-6) {
+              trail.push(sp[j]);
+            }
+          }
+        }
+        if (idxFloor < run.stepSubPaths.length && !reducedMotion) {
+          const sampled = samplePolyline(run.stepSubPaths[idxFloor], frac);
+          for (const pt of sampled.prefix) {
+            if (trail.length === 0 || dist(trail[trail.length - 1], pt) > 1e-6) {
+              trail.push(pt);
+            }
+          }
+          currentPos = sampled.pos;
+        } else {
+          currentPos = run.points[Math.min(idxFloor, run.points.length - 1)];
+          if (trail.length === 0) trail.push(currentPos);
+        }
+      } else {
+        trail = run.points.slice(0, idxFloor + 1);
+        currentPos = reducedMotion
           ? run.points[idxFloor]
           : interpolateVec(run.points[idxFloor], run.points[idxCeil], frac);
-
-      if (!reducedMotion && trail.length > 0 && run.finalStatus !== "flewoff") {
-        trail.push(currentPos);
+        if (!reducedMotion && trail.length > 0) {
+          trail.push(currentPos);
+        }
       }
 
       const slopeVal =
@@ -440,11 +867,15 @@ export default function Page() {
         ? run.finalStatus
         : "running";
 
+      const showEscapeNow =
+        methodDone ||
+        (run.escapeStepIdx !== undefined && clampedCursor >= run.escapeStepIdx);
+
       outRows.push({
         id: run.id,
         glyph: meta.glyph,
         name: meta.name,
-        steps: idxFloor,
+        steps: methodDone ? run.finalSteps : idxFloor,
         slope: slopeVal,
         status: badgeStatus,
         badgeSteps: methodDone ? run.finalSteps : undefined,
@@ -457,14 +888,23 @@ export default function Page() {
         currentPos,
         witnessU: methodDone ? run.witnessU : undefined,
         witnessV: methodDone ? run.witnessV : undefined,
-        escapeFrom: methodDone ? run.escapeFrom : undefined,
-        escapeTo: methodDone ? run.escapeTo : undefined,
+        escapeFrom: showEscapeNow ? run.escapeFrom : undefined,
+        escapeTo: showEscapeNow ? run.escapeTo : undefined,
         flewOffX: methodDone ? run.flewOffX : undefined,
       });
     }
 
     return { rows: outRows, overlays: outOverlays };
-  }, [computedRuns, stepCursor, isRunning, isFinished, winnerId, reducedMotion]);
+  }, [
+    computedRuns,
+    elapsedSec,
+    isRunning,
+    isFinished,
+    winnerId,
+    reducedMotion,
+    raceSchedule,
+    effectiveDomain,
+  ]);
 
   const resultFact = useMemo(() => {
     if (!isFinished) return null;
@@ -477,6 +917,8 @@ export default function Page() {
       <PresetPicker selected={presetId} onSelect={handleSelectPreset} />
       <Stage
         preset={preset}
+        effectiveDomain={effectiveDomain}
+        sixPointsMedian={sixPointsMedian}
         startPoint={startPoint}
         onSelectStartPoint={(pt) => {
           setCustomStart(pt);
@@ -515,6 +957,8 @@ export default function Page() {
         }}
         showNotABowl={showNotABowl}
         onToggleNotABowl={() => setShowNotABowl((v) => !v)}
+        zoomToAction={zoomToAction}
+        onToggleZoom={() => setZoomToAction((z) => !z)}
         reducedMotion={reducedMotion}
         liveAnnouncement={liveAnnouncement}
       />
