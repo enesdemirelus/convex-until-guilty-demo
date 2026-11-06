@@ -7,13 +7,15 @@ import {
 } from "@/lib/math/presets";
 import { Button } from "./Button";
 
+export type SpeedOption = 0.25 | 0.5 | 1 | 2;
+
 interface ControlsProps {
   presetId: PresetId;
   isRunning: boolean;
   onRunPause: () => void;
   onReset: () => void;
-  speed: 1 | 2 | 4;
-  onSpeedChange: (s: 1 | 2 | 4) => void;
+  speed: SpeedOption;
+  onSpeedChange: (s: SpeedOption) => void;
   bowlK: 10 | 100 | 1000;
   onBowlKChange: (k: 10 | 100 | 1000) => void;
   quarticL: number;
@@ -76,7 +78,7 @@ export function Controls({
 
         <div className="dp-controls-group" style={{ marginLeft: "6px" }}>
           <span className="dp-control-label">SPEED</span>
-          {([1, 2, 4] as const).map((s) => (
+          {([0.25, 0.5, 1, 2] as const).map((s) => (
             <Button
               key={s}
               variant="chip"

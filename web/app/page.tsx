@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Hero } from "@/components/Hero";
 import { PresetPicker } from "@/components/PresetPicker";
 import { MethodOverlayRenderData, Stage } from "@/components/Stage";
+import { SpeedOption } from "@/components/Controls";
 import { LedgerRowData, METHOD_META } from "@/components/Ledger";
 import { BadgeStatus } from "@/components/Badge";
 import {
@@ -256,7 +257,7 @@ export default function Page() {
 
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [isFinished, setIsFinished] = useState<boolean>(false);
-  const [speed, setSpeed] = useState<1 | 2 | 4>(1);
+  const [speed, setSpeed] = useState<SpeedOption>(1);
   const [stepCursor, setStepCursor] = useState<number>(0);
   const [reducedMotion, setReducedMotion] = useState<boolean>(false);
   const [liveAnnouncement, setLiveAnnouncement] = useState<string>("");
@@ -308,9 +309,9 @@ export default function Page() {
       return;
     }
 
-    // Target duration: ~2.2s for <= 200 steps, ~3.4s for 13,809 steps at 1x speed
+    // Target duration at 1x: ~3.5s for <= 60 steps, ~4.8s for <= 300 steps, ~5.8s for <= 2000 steps, ~6.8s for 13,809 steps
     const baseDurationSec =
-      maxSteps <= 60 ? 1.5 : maxSteps <= 300 ? 2.2 : maxSteps <= 2000 ? 2.8 : 3.4;
+      maxSteps <= 60 ? 3.5 : maxSteps <= 300 ? 4.8 : maxSteps <= 2000 ? 5.8 : 6.8;
     const stepsPerSecond = (maxSteps / baseDurationSec) * speed;
 
     const tick = (now: number) => {
