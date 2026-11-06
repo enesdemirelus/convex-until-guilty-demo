@@ -1,4 +1,4 @@
-# Roll the Ball — Convex Until Proven Guilty
+# Convex Until Proven Guilty — Accelerated Optimization Demo
 
 Interactive offline demo for Enes Demirel's poster at the DePaul Undergraduate STEM Research Showcase (Faculty sponsor: Dr. Enrico Au-Yeung, Department of Mathematical Sciences, DePaul University), based on Carmon, Duchi, Hinder, and Sidford (2017), *"Convex Until Proven Guilty: Dimension-Free Acceleration of Gradient Descent on Non-Convex Functions"*.
 

@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./tokens.css";
 
 export const metadata: Metadata = {
-  title: "Roll the Ball — Convex Until Proven Guilty",
+  title: "Convex Until Proven Guilty — Accelerated Optimization",
   description:
-    "Watch optimization algorithms race across convex bowls and non-convex hills.",
+    "Interactive benchmark of gradient descent, Nesterov acceleration, and non-convex curvature monitoring.",
 };
 
 export default function RootLayout({
